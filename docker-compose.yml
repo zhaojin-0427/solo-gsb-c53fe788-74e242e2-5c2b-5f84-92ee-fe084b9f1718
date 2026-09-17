@@ -1,0 +1,68 @@
+name: webhook-service
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: webhook
+      POSTGRES_PASSWORD: webhook
+      POSTGRES_DB: webhook
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U webhook -d webhook"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: ./app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment:
+      DATABASE_URL: postgresql+asyncpg://webhook:webhook@db:5432/webhook
+      MAX_ATTEMPTS: "6"
+      BACKOFF_BASE_SECONDS: "1"
+      BACKOFF_MAX_SECONDS: "300"
+      HTTP_TIMEOUT_SECONDS: "10"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  worker:
+    build: ./app
+    command: python -m app.worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://webhook:webhook@db:5432/webhook
+      MAX_ATTEMPTS: "6"
+      BACKOFF_BASE_SECONDS: "1"
+      BACKOFF_MAX_SECONDS: "300"
+      HTTP_TIMEOUT_SECONDS: "10"
+      LEASE_TTL_SECONDS: "30"
+      POLL_INTERVAL_SECONDS: "0.5"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Two replicas demonstrate lease-based work claiming / failover.
+    deploy:
+      replicas: 2
+
+  receiver:
+    build: ./app
+    command: uvicorn app.receiver:app --host 0.0.0.0 --port 9000
+    environment:
+      RECEIVER_SECRET: whsec_dev_receiver_secret
+      RECEIVER_BEHAVIOR: ok
+    ports:
+      - "9000:9000"
+
+volumes:
+  pgdata:
